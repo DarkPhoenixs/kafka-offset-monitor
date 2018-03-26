@@ -1,13 +1,13 @@
 package com.quantifind.kafka
 
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.Executors
 
-import com.quantifind.kafka.OffsetGetter.{BrokerInfo, KafkaInfo, OffsetInfo}
+import com.twitter.util.Time
 import com.quantifind.kafka.core._
 import com.quantifind.kafka.offsetapp.OffsetGetterArgs
+import com.quantifind.kafka.OffsetGetter.{BrokerInfo, KafkaInfo, OffsetInfo}
 import com.quantifind.utils.ZkUtilsWrapper
-import com.twitter.util.Time
 import kafka.common.BrokerNotAvailableException
 import kafka.consumer.{ConsumerConnector, SimpleConsumer}
 import kafka.utils.{Json, Logging, ZkUtils}
@@ -41,7 +41,11 @@ trait OffsetGetter extends Logging {
 
 	def getGroups: Seq[String]
 
+	def getActiveGroups: Seq[String]
+
 	def getTopicMap: Map[String, Seq[String]]
+
+	def getTopicsAndLogEndOffsets: Seq[TopicLogEndOffsetInfo]
 
 	def getActiveTopicMap: Map[String, Seq[String]]
 
@@ -113,6 +117,9 @@ trait OffsetGetter extends Logging {
 	// get list of all topics
 	def getTopics: Seq[String] = {
 		try {
+			val unsortedTopics: Seq[String] = zkUtils.getChildren(ZkUtils.BrokerTopicsPath)
+
+
 			zkUtils.getChildren(ZkUtils.BrokerTopicsPath).sortWith(_ < _)
 		} catch {
 			case NonFatal(t) =>
@@ -185,9 +192,23 @@ trait OffsetGetter extends Logging {
 			}
 		}.toSeq)
 	}
+
+	def getConsumerGroupStatus: String
+
+	def close() {
+		// TODO: What is going on here?  This code is broken
+		/*
+		for (consumerOpt <- consumerMap.values) {
+		  consumerOpt match {
+			case Some(consumer) => consumer.close()
+			case None => // ignore
+		  }
+		}
+		*/
+	}
 }
 
-object OffsetGetter {
+object OffsetGetter extends Logging {
 
 	case class KafkaInfo(name: String, brokers: Seq[BrokerInfo], offsets: Seq[OffsetInfo])
 
@@ -210,10 +231,39 @@ object OffsetGetter {
 	var newKafkaConsumer: KafkaConsumer[String, String] = null
 
 	def createZkUtils(args: OffsetGetterArgs): ZkUtils = {
-		ZkUtils(args.zk,
+
+		val sleepAfterFailedZkUtilsInstantiation: Int = 30000
+		var zkUtils: ZkUtils = null
+
+		while (null == zkUtils) {
+
+			try {
+
+				info("Creating new ZkUtils object.");
+				zkUtils = ZkUtils(args.zk,
 			args.zkSessionTimeout.toMillis.toInt,
 			args.zkConnectionTimeout.toMillis.toInt,
 			JaasUtils.isZkSecurityEnabled())
+			}
+
+			catch {
+
+				case e: Throwable =>
+
+					if (null != zkUtils) {
+
+						zkUtils.close()
+						zkUtils = null
+					}
+
+					val errorMsg = "Error creating ZkUtils.  Will attempt to re-create in %d seconds".format(sleepAfterFailedZkUtilsInstantiation)
+					error(errorMsg, e)
+					Thread.sleep(sleepAfterFailedZkUtilsInstantiation)
+			}
+		}
+
+		info("Created zkUtils object: "+ zkUtils)
+		zkUtils
 	}
 
 	def getInstance(args: OffsetGetterArgs): OffsetGetter = {

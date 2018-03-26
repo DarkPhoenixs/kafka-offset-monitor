@@ -209,7 +209,7 @@ angular.module("offsetapp.directives", [])
 							opposite: true
 						}],
 						series : [{
-							name: "log size",
+							name: "log-end offset",
 							data:d[0],
 							yAxis: 0,
 							color: '#088CFE',
@@ -218,7 +218,7 @@ angular.module("offsetapp.directives", [])
 								radius : 3
 							}},
 								  {
-									  name: "offset",
+									  name: "committed offset",
 									  data:d[1],
 									  color: '#B9E6D9',
 									  yAxis: 0,

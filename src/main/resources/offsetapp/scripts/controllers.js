@@ -36,7 +36,7 @@ angular.module('offsetapp.controllers',["offsetapp.services"])
 
     								  $scope.topic = $routeParams.topic;
     							  }])
-  .controller("TopicConsumersCtrl", ["$scope", "$interval", "$routeParams", "offsetinfo",
+	.controller("TopicConsumersCtrl", ["$scope", "$interval", "$routeParams", "offsetinfo",
                     function($scope, $interval, $routeParams, offsetinfo) {
                       offsetinfo.topicConsumers($routeParams.topic, function(d) {
                         $scope.info = d;
@@ -53,7 +53,7 @@ angular.module('offsetapp.controllers',["offsetapp.services"])
                                      offsetinfo.loadClusterViz($routeParams.group, function(d) {
                                     });
        							  }])
-    .controller("ActiveTopicsVizCtrl", ["$scope", "$interval", "$routeParams", "offsetinfo",
+	.controller("ActiveTopicsVizCtrl", ["$scope", "$interval", "$routeParams", "offsetinfo",
                                   function($scope, $interval, $routeParams, offsetinfo) {
                                       $scope.loading = true;
                                       offsetinfo.loadTopicConsumerViz($routeParams.group, function(d) {

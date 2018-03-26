@@ -13,6 +13,7 @@ import com.quantifind.sumac.{ArgMain, FieldArgs}
 import com.quantifind.sumac.validation.Required
 import com.quantifind.sumac.{ArgMain, FieldArgs}
 
+import kafka.utils.ZkUtils
 import org.I0Itec.zkclient.ZkClient
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -111,7 +112,7 @@ object OffsetGetterApp extends ArgMain[OffsetGetterArgsWGT] {
       }
 
     } finally {
-
+      if (og != null) og.close()
     }
   }
 }

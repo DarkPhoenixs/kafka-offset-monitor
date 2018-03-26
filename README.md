@@ -57,7 +57,7 @@ This is a small web app, you can run it locally or on a server, as long as you h
 ```
 
 java -Djava.security.auth.login.config=conf/server-client-jaas.conf \
-	-cp KafkaOffsetMonitor-assembly-0.4.0.jar \
+	-cp KafkaOffsetMonitor-assembly-0.4.6.jar \
        com.quantifind.kafka.offsetapp.OffsetGetterWeb \
      --offsetStorage kafka \
      --kafkaBrokers kafkabroker01:6667,kafkabroker02:6667 \
@@ -126,7 +126,7 @@ As long as this is true you will need to use local maven repo and just publish K
 Assuming you have a custom implementation of OffsetInfoReporter in a jar file, running it is as simple as adding the jar to the classpath when running app:
 
 ```
-java -cp KafkaOffsetMonitor-assembly-0.3.0.jar:kafka-offset-monitor-another-db-reporter.jar \
+java -cp KafkaOffsetMonitor-assembly-0.4.6.jar:kafka-offset-monitor-another-db-reporter.jar \
      com.quantifind.kafka.offsetapp.OffsetGetterWeb \
      --zk zkserver01,zkserver02 \
      --port 8080 \
@@ -141,7 +141,3 @@ Contributing
 ============
 
 The KafkaOffsetMonitor is released under the Apache License and we **welcome any contributions** within this license. Any pull request is welcome and will be reviewed and merged as quickly as possible.
-
-Because this open source tool is released by [Quantifind](http://www.quantifind.com) as a company, if you want to submit a pull request, you will have to sign the following simple contributors agreement:
-- If you are an individual, please sign [this contributors agreement](https://docs.google.com/a/quantifind.com/document/d/1RS7qEjq3cCmJ1665UhoCMK8541Ms7KyU3kVFoO4CR_I/) and send it back to contributors@quantifind.com
-- If you are contributing changes that you did as part of your work, please sign [this contributors agreement](https://docs.google.com/a/quantifind.com/document/d/1kNwLT4qG3G0Ct2mEuNdBGmKDYuApN1CpQtZF8TSVTjE/) and send it back to contributors@quantifind.com

@@ -1,13 +1,15 @@
 package com.quantifind.kafka.core
 
+import com.morningstar.kafka.KafkaConsumerGroup
 import com.quantifind.kafka.OffsetGetter
 import com.quantifind.kafka.OffsetGetter.OffsetInfo
 import com.quantifind.utils.ZkUtilsWrapper
 import com.twitter.util.Time
 import kafka.api.{OffsetRequest, PartitionOffsetRequestInfo}
 import kafka.common.TopicAndPartition
-import kafka.utils.{Json}
+import kafka.utils.Json
 import org.I0Itec.zkclient.exception.ZkNoNodeException
+import org.apache.kafka.common.TopicPartition
 import org.apache.zookeeper.data.Stat
 
 import scala.collection._
@@ -72,6 +74,8 @@ class StormOffsetGetter(theZkUtils: ZkUtilsWrapper, zkOffsetBase: String) extend
     }
   }
 
+  override def getActiveGroups: Seq[String] = getGroups
+
   /**
    * Finds all topics for this group, for Kafka Spout there is only one
    */
@@ -115,4 +119,8 @@ class StormOffsetGetter(theZkUtils: ZkUtilsWrapper, zkOffsetBase: String) extend
     // not really have a way to determine which consumer is active now, so return all
     getTopicMap
   }
+
+  override def getTopicsAndLogEndOffsets: Seq[TopicLogEndOffsetInfo] = ???
+
+  override def getConsumerGroupStatus: String = ???
 }

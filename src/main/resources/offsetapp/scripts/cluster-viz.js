@@ -2,8 +2,8 @@ function loadViz(load_to_id, data_path) {
 
 
     var m = [0, 120, 0, 120],
-        w = 1400 - m[1] - m[3],
-        h = 500 - m[0] - m[2],
+        w = 1200 - m[1] - m[3],
+        h = 900 - m[0] - m[2],
         i = 0,
         root;
 
@@ -47,8 +47,8 @@ function loadViz(load_to_id, data_path) {
 
 function updateClusterViz(source, tree, vis, diagonal) {
      var m = [0, 120, 0, 120],
-            w = 1400 - m[1] - m[3],
-            h = 800 - m[0] - m[2],
+            w = 1200 - m[1] - m[3],
+            h = 900 - m[0] - m[2],
             i = 0;
 
 

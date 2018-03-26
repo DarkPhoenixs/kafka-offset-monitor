@@ -2,7 +2,14 @@ package com.quantifind.kafka.core
 
 import java.nio.{BufferUnderflowException, ByteBuffer}
 import java.util
+import java.util.concurrent.atomic.AtomicReference
 import java.util.{Arrays, Properties}
+
+import com.morningstar.kafka.KafkaCommittedOffset
+import com.morningstar.kafka.KafkaOffsetMetadata
+import com.morningstar.kafka.KafkaOffsetStorage
+import com.morningstar.kafka.KafkaTopicPartition
+import com.morningstar.kafka.KafkaTopicPartitionLogEndOffset
 
 import com.quantifind.kafka.OffsetGetter.OffsetInfo
 import com.quantifind.kafka.offsetapp.OffsetGetterArgs
@@ -17,14 +24,14 @@ import org.apache.kafka.clients.CommonClientConfigs
 import org.apache.kafka.clients.consumer._
 import org.apache.kafka.common.{PartitionInfo, TopicPartition}
 
-import scala.collection._
+import scala.collection.{mutable, _}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.{Await, Future, duration}
 
 
 /**
-  * Created by rcasey on 11/16/2016.
-  */
+	* Created by rcasey on 11/16/2016.
+	*/
 class KafkaOffsetGetter(zkUtilsWrapper: ZkUtilsWrapper, args: OffsetGetterArgs) extends OffsetGetter {
 
 	import KafkaOffsetGetter._
@@ -37,27 +44,55 @@ class KafkaOffsetGetter(zkUtilsWrapper: ZkUtilsWrapper, args: OffsetGetterArgs) 
 
 		val topicPartition = new TopicPartition(topic, partitionId)
 		val topicAndPartition = TopicAndPartition(topic, partitionId)
+		val optionalOffsetMetaData: Option[OffsetAndMetadata] = committedOffsetMap.get(GroupTopicPartition(group, topicAndPartition))
 
-		committedOffsetMap.get(GroupTopicPartition(group, topicAndPartition)) map { offsetMetaData =>
+		if (!optionalOffsetMetaData.isDefined) {
+			error(s"processPartition: Could not find group-topic-partition in committedOffsetsMap, g:$group,t:$topic,p:$partitionId")
+			return None
+		}
 
-			// BIT O'HACK to deal with timing:
-			// Due to thread and processing timing, it is possible that the value we have for the topicPartition's
-			// logEndOffset has not yet been updated to match the value on the broker.  When this happens, report the
-			// topicPartition's logEndOffset as "committedOffset - lag", as the topicPartition's logEndOffset is *AT LEAST*
-			// this value
-			val logEndOffset: Option[Long] = logEndOffsetsMap.get(topicPartition)
-			val committedOffset: Long = offsetMetaData.offset
-			val lag: Long = logEndOffset.get - committedOffset
-			val logEndOffsetReported: Long = if (lag < 0) committedOffset - lag else logEndOffset.get
+		val offsetMetaData: OffsetAndMetadata = optionalOffsetMetaData.get;
+		val isActiveGroup: Boolean = isGroupActive(group)
 
-			// Get client information if we can find an associated client
-			var clientString: Option[String] = Option("NA")
-			val filteredClients = clients.filter(c => (c.group == group && c.topicPartitions.contains(topicPartition)))
-			if (!filteredClients.isEmpty) {
-				val client: ClientGroup = filteredClients.head
-				clientString = Option(client.clientId + client.clientHost)
-			}
+		kafkaOffsetStorage.addCommittedOffset(
+			new KafkaCommittedOffset(
+				group,
+				isActiveGroup,
+				topic,
+				partitionId,
+				offsetMetaData.offset,
+				offsetMetaData.commitTimestamp
+			)
+		)
 
+		if (!isActiveGroup) {
+			info(s"processPartition: Not reporting offset because group is not active, g:$group,t:$topic,p:$partitionId")
+			return None
+		}
+
+		val logEndOffset: Long = logEndOffsetsMap.get(topicPartition).getOrElse(-1)
+
+		if (logEndOffset == -1) {
+			info(s"processPartition: Not reporting this offset as we do not yet have logEndOffset to calc lag, g:$group,t:$topic,p:$partitionId")
+			return None
+		}
+
+		// BIT O'HACK to deal with timing:
+		// Due to thread and processing timing, it is possible that the value we have for the topicPartition's
+		// logEndOffset has not yet been updated to match the value on the broker.  When this happens, report the
+		// topicPartition's logEndOffset as "committedOffset - lag", as the topicPartition's logEndOffset is *AT LEAST*
+		// this value
+		val committedOffset: Long = offsetMetaData.offset
+		val logEndOffsetReported: Long = if (committedOffset > logEndOffset) committedOffset else logEndOffset
+
+		// Get client information if we can find an associated client
+		var clientString: Option[String] = Option("NA")
+		val filteredClient = clients.get().filter(c => (c.group == group && c.topicPartitions.contains(topicPartition))).headOption
+		if (filteredClient.isDefined) {
+			clientString = Option(filteredClient.get.clientId + filteredClient.get.clientHost)
+		}
+
+		Some(
 			OffsetInfo(group = group,
 				topic = topic,
 				partition = partitionId,
@@ -66,34 +101,81 @@ class KafkaOffsetGetter(zkUtilsWrapper: ZkUtilsWrapper, args: OffsetGetterArgs) 
 				owner = clientString,
 				creation = Time.fromMilliseconds(offsetMetaData.commitTimestamp),
 				modified = Time.fromMilliseconds(offsetMetaData.expireTimestamp))
-		}
+		)
 	}
 
 	override def getGroups: Seq[String] = {
-		topicAndGroups.groupBy(_.group).keySet.toSeq.sorted
+		committedOffsetMap.keys.map(_.group).toSet.toSeq.sorted
+		//topicAndGroups.get().groupBy(_.group).keySet.toSeq.sorted
+	}
+
+	override def getActiveGroups: Seq[String] = {
+		activeTopicAndGroups.get()
+			.map(_.group)
+			.toSeq
 	}
 
 	override def getTopicList(group: String): List[String] = {
-		topicAndGroups.filter(_.group == group).groupBy(_.topic).keySet.toList.sorted
+		committedOffsetMap.keySet
+			.filter(_.group.equals(group))
+			.map(_.topicPartition.topic)
+			.toSeq
+			.toList
+		//topicAndGroups.get().filter(_.group == group).groupBy(_.topic).keySet.toList.sorted
 	}
 
 	override def getTopicMap: Map[String, scala.Seq[String]] = {
-		topicAndGroups.groupBy(_.topic).mapValues(_.map(_.group).toSeq)
+		committedOffsetMap.keySet
+			.groupBy(_.topicPartition.topic)
+			.mapValues(_.map(_.group).toSeq)
+
+		//topicAndGroups.get().groupBy(_.topic).mapValues(_.map(_.group).toSeq)
 	}
 
 	override def getActiveTopicMap: Map[String, Seq[String]] = {
-		getTopicMap
+		activeTopicAndGroups.get().groupBy(_.topic).mapValues(_.map(_.group).toSeq)
+		//getTopicMap
 	}
 
 	override def getTopics: Seq[String] = {
-		topicPartitionsMap.keys.toSeq.sorted
+		activeTopicPartitionsMap.get().keys.toSeq.sorted
+	}
+
+	override def getTopicsAndLogEndOffsets: Seq[TopicLogEndOffsetInfo] = {
+		var topicsAndLogEndOffsets: Set[TopicLogEndOffsetInfo] = mutable.HashSet()
+
+		for (topic: String <- activeTopicPartitionsMap.get().keys) {
+
+			var topicPartitionOffsetSet: Set[TopicPartitionLogEndOffset] = new mutable.HashSet[TopicPartitionLogEndOffset]
+			var sumLogEndOffset: Long = 0;
+
+			val topicPartitionOffset: immutable.Map[TopicPartition, Long] = logEndOffsetsMap.filter(p => p._1.topic() == topic).toMap
+			for (topicPartition: TopicPartition <- topicPartitionOffset.keys.toSeq.sortWith(_.partition() > _.partition())) {
+
+				val partition: Int = topicPartition.partition()
+				val logEndOffset: Long = logEndOffsetsMap.get(topicPartition).getOrElse(0)
+
+				sumLogEndOffset += logEndOffset
+				topicPartitionOffsetSet += TopicPartitionLogEndOffset(topic, partition, logEndOffset)
+			}
+
+			topicsAndLogEndOffsets += TopicLogEndOffsetInfo(topic, sumLogEndOffset, topicPartitionOffsetSet.toSeq.sorted)
+		}
+
+		topicsAndLogEndOffsets.toSeq.sorted
 	}
 
 	override def getClusterViz: Node = {
-		val clusterNodes = topicPartitionsMap.values.map(partition => {
+		val clusterNodes = activeTopicPartitionsMap.get().values.map(partition => {
 			Node(partition.get(0).leader().host() + ":" + partition.get(0).leader().port(), Seq())
 		}).toSet.toSeq.sortWith(_.name < _.name)
 		Node("KafkaCluster", clusterNodes)
+	}
+
+	def isGroupActive(group: String): Boolean = getActiveGroups.exists(_.equals(group))
+
+	override def getConsumerGroupStatus: String = {
+		kafkaOffsetStorage.getConsumerGroups()
 	}
 }
 
@@ -101,12 +183,13 @@ object KafkaOffsetGetter extends Logging {
 
 	val committedOffsetMap: concurrent.Map[GroupTopicPartition, OffsetAndMetadata] = concurrent.TrieMap()
 	val logEndOffsetsMap: concurrent.Map[TopicPartition, Long] = concurrent.TrieMap()
+	val kafkaOffsetStorage: KafkaOffsetStorage = new KafkaOffsetStorage();
 
 	// Swap the object on update
-	var activeTopicPartitions: immutable.Set[TopicAndPartition] = immutable.HashSet()
-	var clients: immutable.Set[ClientGroup] = immutable.HashSet()
-	var topicAndGroups: immutable.Set[TopicAndGroup] = immutable.HashSet()
-	var topicPartitionsMap: immutable.Map[String, util.List[PartitionInfo]] = immutable.HashMap()
+	var activeTopicPartitions: AtomicReference[immutable.Set[TopicAndPartition]] = new AtomicReference(immutable.HashSet())
+	var clients: AtomicReference[immutable.Set[ClientGroup]] = new AtomicReference(immutable.HashSet())
+	var activeTopicAndGroups: AtomicReference[immutable.Set[TopicAndGroup]] = new AtomicReference(immutable.HashSet())
+	var activeTopicPartitionsMap: AtomicReference[immutable.Map[String, util.List[PartitionInfo]]] = new AtomicReference(immutable.HashMap())
 
 
 	private def createNewKafkaConsumer(args: OffsetGetterArgs, group: String, autoCommitOffset: Boolean): KafkaConsumer[Array[Byte], Array[Byte]] = {
@@ -162,13 +245,13 @@ object KafkaOffsetGetter extends Logging {
 	}
 
 	/**
-	  * Attempts to parse a kafka message as an offset message.
-	  *
-	  * @author Robert Casey (rcasey212@gmail.com)
-	  * @param message message retrieved from the kafka client's poll() method
-	  * @return key-value of GroupTopicPartition and OffsetAndMetadata if the message was a valid offset message,
-	  *         otherwise None
-	  */
+		* Attempts to parse a kafka message as an offset message.
+		*
+		* @author Robert Casey (rcasey212@gmail.com)
+		* @param message message retrieved from the kafka client's poll() method
+		* @return key-value of GroupTopicPartition and OffsetAndMetadata if the message was a valid offset message,
+		*         otherwise None
+		*/
 	def tryParseOffsetMessage(message: ConsumerRecord[Array[Byte], Array[Byte]]): Option[(GroupTopicPartition, OffsetAndMetadata)] = {
 
 		try {
@@ -359,9 +442,9 @@ object KafkaOffsetGetter extends Logging {
 								})
 							})
 
-							activeTopicPartitions = newActiveTopicPartitions.toSet
-							clients = newClients.toSet
-							topicAndGroups = newTopicAndGroups.toSet
+							activeTopicPartitions.set(newActiveTopicPartitions.toSet)
+							clients.set(newClients.toSet)
+							activeTopicAndGroups.set(newTopicAndGroups.toSet)
 						}
 
 						catch {
@@ -404,7 +487,6 @@ object KafkaOffsetGetter extends Logging {
 
 	def startLogEndOffsetGetter(args: OffsetGetterArgs) = {
 
-		val group: String = "kafka-monitor-LogEndOffsetGetter"
 		val sleepOnDataRetrieval: Int = 10000
 		val sleepOnError: Int = 30000
 		var logEndOffsetGetter: KafkaConsumer[Array[Byte], Array[Byte]] = null
@@ -415,12 +497,13 @@ object KafkaOffsetGetter extends Logging {
 
 				while (null == logEndOffsetGetter) {
 
+					val group: String = "kafka-monitor-LogEndOffsetGetter"
 					logEndOffsetGetter = createNewKafkaConsumer(args, group, false)
 				}
 
 				// Get topic-partitions
-				topicPartitionsMap = JavaConversions.mapAsScalaMap(logEndOffsetGetter.listTopics()).toMap
-				val distinctPartitionInfo: Seq[PartitionInfo] = (topicPartitionsMap.values).flatten(listPartitionInfo => JavaConversions.asScalaBuffer(listPartitionInfo)).toSeq
+				activeTopicPartitionsMap.set(JavaConversions.mapAsScalaMap(logEndOffsetGetter.listTopics()).toMap)
+				val distinctPartitionInfo: Seq[PartitionInfo] = (activeTopicPartitionsMap.get().values).flatten(listPartitionInfo => JavaConversions.asScalaBuffer(listPartitionInfo)).toSeq
 
 				// Iterate over each distinct PartitionInfo
 				distinctPartitionInfo.foreach(partitionInfo => {
@@ -430,6 +513,12 @@ object KafkaOffsetGetter extends Logging {
 					logEndOffsetGetter.assign(Arrays.asList(topicPartition))
 					logEndOffsetGetter.seekToEnd(topicPartition)
 					val logEndOffset: Long = logEndOffsetGetter.position(topicPartition)
+
+					// Update KafkaOffsetStorage
+					kafkaOffsetStorage.addLogEndOffset(
+						new KafkaTopicPartitionLogEndOffset(
+							new KafkaTopicPartition(partitionInfo.topic, partitionInfo.partition),
+							new KafkaOffsetMetadata(logEndOffset, System.currentTimeMillis())));
 
 					// Update the TopicPartition map with the current LogEndOffset if it exists, else add a new entry to the map
 					if (logEndOffsetsMap.contains(topicPartition)) {
@@ -454,6 +543,8 @@ object KafkaOffsetGetter extends Logging {
 						logEndOffsetGetter.close()
 						logEndOffsetGetter = null
 					}
+
+					Thread.sleep(sleepOnError)
 				}
 			}
 		}
@@ -463,3 +554,32 @@ object KafkaOffsetGetter extends Logging {
 case class TopicAndGroup(topic: String, group: String)
 
 case class ClientGroup(group: String, clientId: String, clientHost: String, topicPartitions: Set[TopicPartition])
+
+case class TopicPartitionLogEndOffset(topic: String, partition: Int, logEndOffset: Long) extends Ordered [TopicPartitionLogEndOffset] {
+
+	def compare (that: TopicPartitionLogEndOffset) = {
+		if (this.topic == that.topic) {
+			if (this.partition > that.partition)
+				1
+			else if (this.partition < that.partition)
+				-1
+			else
+				0
+		}
+		else if (this.topic > that.topic)
+			1
+		else
+			-1
+	}
+}
+
+case class TopicLogEndOffsetInfo(topic: String, sumLogEndOffset: Long, partitions: Seq[TopicPartitionLogEndOffset]) extends Ordered[TopicLogEndOffsetInfo] {
+
+	def compare (that:TopicLogEndOffsetInfo) = {
+		if (this.topic == that.topic) 0
+		else if (this.topic > that.topic) 1
+		else -1
+	}
+}
+
+//case class OffsetMetadataAndLag

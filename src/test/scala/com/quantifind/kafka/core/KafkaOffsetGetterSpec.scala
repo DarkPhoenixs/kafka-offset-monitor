@@ -20,14 +20,16 @@ class KafkaOffsetGetterSpec extends FlatSpec with ShouldMatchers {
 
   trait Fixture {
 
-    val mockedZkUtil =  Mockito.mock(classOf[ZkUtilsWrapper])
-    val mockedConsumer = Mockito.mock(classOf[SimpleConsumer])
+		val mockedZkUtil: ZkUtilsWrapper =  Mockito.mock(classOf[ZkUtilsWrapper])
+		val mockedConsumer: SimpleConsumer = Mockito.mock(classOf[SimpleConsumer])
     val testPartitionLeader = 1
 
     val args = new OffsetGetterArgs
 
-    val offsetGetter = new KafkaOffsetGetter(mockedZkUtil, args)
+		val offsetGetter: KafkaOffsetGetter = new KafkaOffsetGetter(mockedZkUtil, args)
     offsetGetter.consumerMap += (testPartitionLeader -> Some(mockedConsumer))
+		val offsetGetterSpy: KafkaOffsetGetter = spy(offsetGetter)
+
   }
 
   "KafkaOffsetGetter" should "be able to build offset data for given partition" in new Fixture {
@@ -52,8 +54,9 @@ class KafkaOffsetGetterSpec extends FlatSpec with ShouldMatchers {
     val partitionErrorAndOffsets = Map(topicAndPartition -> PartitionOffsetsResponse(0, Seq(logEndOffset)))
     val offsetResponse = OffsetResponse(1, partitionErrorAndOffsets)
     when(mockedConsumer.getOffsetsBefore(any[OffsetRequest])).thenReturn(offsetResponse)
+		when(offsetGetterSpy.isGroupActive(any[String])).thenReturn(true)
 
-    offsetGetter.processPartition(testGroup, testTopic, testPartition) match {
+		offsetGetterSpy.processPartition(testGroup, testTopic, testPartition) match {
       case Some(offsetInfo) =>
         offsetInfo.topic shouldBe testTopic
         offsetInfo.group shouldBe testGroup

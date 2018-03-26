@@ -49,9 +49,13 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
 
   def htmlRoot: String = "/offsetapp"
 
-  val  scheduler : ScheduledExecutorService = Executors.newScheduledThreadPool(2)
+	val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
 
   var reporters: mutable.Set[OffsetInfoReporter] = null
+
+	val millisBeforeStartingReportingThread = 0
+	val millisBeforeStartingCleanupThread = 0
+
 
   def retryTask[T](fn: => T) {
     try {
@@ -65,20 +69,37 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
   }
 
   def reportOffsets(args: OWArgs) {
+
+		try {
     val groups = getGroups(args)
     groups.foreach {
       g =>
         val inf = getInfo(g, args).offsets.toIndexedSeq
         debug(s"reporting ${inf.size}")
-        reporters.foreach( reporter => retryTask { reporter.report(inf) } )
+					reporters.foreach(reporter => retryTask {
+						reporter.report(inf)
+					})
     }
   }
+		catch {
 
-  def schedule(args: OWArgs) {
+			case e: Throwable =>
+				error("Error while in reportOffsets().", e)
+		}
+	}
 
-    scheduler.scheduleAtFixedRate( () => { reportOffsets(args) }, 0, args.refresh.toMillis, TimeUnit.MILLISECONDS )
-    scheduler.scheduleAtFixedRate( () => { reporters.foreach(reporter => retryTask({reporter.cleanupOldData()})) }, args.retain.toMillis, args.retain.toMillis, TimeUnit.MILLISECONDS )
+	def cleanupOldData() = {
 
+		reporters.foreach(reporter => retryTask({ reporter.cleanupOldData() }));
+	}
+
+	/* Schedule time-based threads */
+	def schedule(args: OWArgs) {
+
+		scheduler.scheduleAtFixedRate(() => { reportOffsets(args) },
+			millisBeforeStartingReportingThread, args.refresh.toMillis, TimeUnit.MILLISECONDS)
+		scheduler.scheduleAtFixedRate(() => { cleanupOldData() },
+			millisBeforeStartingCleanupThread, args.retain.toMillis, TimeUnit.MILLISECONDS)
   }
 
   def withOG[T](args: OWArgs)(f: OffsetGetter => T): T = {
@@ -87,7 +108,7 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
       og = OffsetGetter.getInstance(args)
       f(og)
     } finally {
-
+			if (og != null) og.close()
     }
   }
 
@@ -97,14 +118,23 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
 
   def getGroups(args: OWArgs) = withOG(args) {
     _.getGroups
+	}
+
+	def getActiveGroups(args: OWArgs) = withOG(args) {
+		_.getActiveGroups
   }
 
   def getActiveTopics(args: OWArgs) = withOG(args) {
     _.getActiveTopics
   }
+
   def getTopics(args: OWArgs) = withOG(args) {
     _.getTopics
   }
+
+	def getTopicsAndLogEndOffsets(args: OWArgs) = withOG(args) {
+		_.getTopicsAndLogEndOffsets
+	}
 
   def getTopicDetail(topic: String, args: OWArgs) = withOG(args) {
     _.getTopicDetail(topic)
@@ -118,20 +148,23 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
     _.getClusterViz
   }
 
+	def getConsumerGroupStatus(args: OWArgs) = withOG(args) {
+		_.getConsumerGroupStatus
+	}
+
   override def afterStop() {
 
     scheduler.shutdown()
   }
 
-  class TimeSerializer extends CustomSerializer[Time](format => (
-    {
-      case JInt(s)=>
-        Time.fromMilliseconds(s.toLong)
-    },
-    {
-      case x: Time =>
-        JInt(x.inMilliseconds)
-    }
+	class TimeSerializer extends CustomSerializer[Time](format => ( {
+		case JInt(s) =>
+        	Time.fromMilliseconds(s.toLong)
+		},
+		{
+		  case x: Time =>
+		    JInt(x.inMilliseconds)
+		}
     ))
 
   override def setup(args: OWArgs): Plan = new Plan {
@@ -144,15 +177,17 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
 
     def intent: Plan.Intent = {
       case GET(Path(Seg("group" :: Nil))) =>
-        JsonContent ~> ResponseString(write(getGroups(args)))
+				JsonContent ~> ResponseString(write(getActiveGroups(args)))
       case GET(Path(Seg("group" :: group :: Nil))) =>
         val info = getInfo(group, args)
         JsonContent ~> ResponseString(write(info)) ~> Ok
       case GET(Path(Seg("group" :: group :: topic :: Nil))) =>
         val offsets = args.db.offsetHistory(group, topic)
         JsonContent ~> ResponseString(write(offsets)) ~> Ok
+			case GET(Path(Seg("consumergroup" :: Nil))) =>
+				JsonContent ~> ResponseString(getConsumerGroupStatus(args)) ~> Ok
       case GET(Path(Seg("topiclist" :: Nil))) =>
-        JsonContent ~> ResponseString(write(getTopics(args)))
+				JsonContent ~> ResponseString(write(getTopicsAndLogEndOffsets(args)))
       case GET(Path(Seg("clusterlist" :: Nil))) =>
         JsonContent ~> ResponseString(write(getClusterViz(args)))
       case GET(Path(Seg("topicdetails" :: topic :: Nil))) =>
@@ -172,10 +207,11 @@ object OffsetGetterWeb extends UnfilteredWebApp[OWArgs] with Logging {
 
     val reportersSet: mutable.Set[Class[_ <: OffsetInfoReporter]] = scala.collection.JavaConversions.asScalaSet(reportersTypes)
 
-    // SQLiteOffsetInfoReporter as a main storage is instantiated explicitly outside this loop so it is filtered out
+		// SQLiteOffsetInfoReporter as a main storage is instantiated separately as it has a different constructor from
+		// the other OffsetInfoReporter objects
     reportersSet
       .filter(!_.equals(classOf[SQLiteOffsetInfoReporter]))
-      .map((reporterType: Class[_ <: OffsetInfoReporter]) =>  createReporterInstance(reporterType, args.pluginsArgs))
+				.map((reporterType: Class[_ <: OffsetInfoReporter]) => createReporterInstance(reporterType, args.pluginsArgs))
       .+(new SQLiteOffsetInfoReporter(argHolder.db, args))
   }
 
